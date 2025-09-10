@@ -84,7 +84,7 @@ class SelfAttention(Layer):
 
 class Discriminator(Model):
     """Main Discriminator model."""
-    def __init__(self, df_dim, num_classes, **kwargs):
+    def __init__(self, df_dim, **kwargs):
         super(Discriminator, self).__init__(**kwargs)
         self.df_dim = df_dim
         self.num_classes = num_classes
@@ -97,9 +97,8 @@ class Discriminator(Model):
         self.block6 = DBlock(df_dim * 16, downsample=False)
 
         self.final_dense = SpectralNormalization(Dense(1))
-        self.embedding = SpectralNormalization(Dense(df_dim * 16))
 
-    def call(self, inputs, labels, training=True):
+    def call(self, inputs, training=True):
         x = inputs
         x = self.block1(x)
         x = self.block2(x)
@@ -115,11 +114,5 @@ class Discriminator(Model):
         
         # Classificação real/falso
         logits = self.final_dense(x)
-
-        # Projeção da camada de rótulos
-        label_embedding = self.embedding(labels)
-        
-        # Adiciona a informação de classe aos logits
-        logits += tf.reduce_sum(x * label_embedding, axis=1, keepdims=True)
 
         return logits
