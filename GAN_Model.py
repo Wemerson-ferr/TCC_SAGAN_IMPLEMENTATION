@@ -10,13 +10,14 @@ class GAN(Model):
     """
     Representa a arquitetura GAN que combina o Gerador e o Discriminador.
     """
-    def __init__(self, z_dim, gf_dim, df_dim, num_classes, **kwargs):
+    def __init__(self, z_dim, gf_dim, df_dim, **kwargs):  # Removido num_classes
         super(GAN, self).__init__(**kwargs)
         
-        self.generator = Generator(gf_dim, num_classes, z_dim)
-        self.discriminator = Discriminator(df_dim, num_classes)
+        # As classes Generator e Discriminator agora não precisam mais de 'num_classes'
+        self.generator = Generator(gf_dim, z_dim)
+        self.discriminator = Discriminator(df_dim)
         self.z_dim = z_dim
-        self.num_classes = num_classes
+        # Removido self.num_classes
 
     def compile(self, d_optimizer, g_optimizer, d_loss_fn, g_loss_fn):
         super(GAN, self).compile()
@@ -32,45 +33,33 @@ class GAN(Model):
         return [self.d_metric, self.g_metric]
 
     def train_step(self, data):
-        real_images, real_labels = data
+        # O 'data' agora contém apenas as imagens reais, sem os rótulos
+        real_images = data
 
-        # 1. Treinar o Discriminador
-        # Gerar imagens falsas
         batch_size = tf.shape(real_images)[0]
         random_z = tf.random.normal(shape=(batch_size, self.z_dim))
         
-        # Gerar rótulos falsos
-        fake_labels = tf.random.uniform(
-            shape=(batch_size,), 
-            minval=0, 
-            maxval=self.num_classes, 
-            dtype=tf.int32
-        )
-        fake_labels_one_hot = tf.one_hot(fake_labels, self.num_classes)
-
+        # Não há necessidade de gerar rótulos falsos
+        
         with tf.GradientTape() as tape:
-            fake_images = self.generator([random_z, fake_labels_one_hot])
-            real_output = self.discriminator([real_images, real_labels])
-            fake_output = self.discriminator([fake_images, fake_labels_one_hot])
+            # O gerador agora recebe apenas o vetor de ruído
+            fake_images = self.generator(random_z)
+            # O discriminador agora recebe apenas a imagem
+            real_output = self.discriminator(real_images)
+            fake_output = self.discriminator(fake_images)
             d_loss = self.d_loss_fn(real_output, fake_output)
 
         d_grads = tape.gradient(d_loss, self.discriminator.trainable_variables)
         self.d_optimizer.apply_gradients(zip(d_grads, self.discriminator.trainable_variables))
         self.d_metric.update_state(d_loss)
 
-        # 2. Treinar o Gerador
         with tf.GradientTape() as tape:
             random_z = tf.random.normal(shape=(batch_size, self.z_dim))
-            fake_labels = tf.random.uniform(
-                shape=(batch_size,), 
-                minval=0, 
-                maxval=self.num_classes, 
-                dtype=tf.int32
-            )
-            fake_labels_one_hot = tf.one_hot(fake_labels, self.num_classes)
             
-            fake_images = self.generator([random_z, fake_labels_one_hot])
-            fake_output = self.discriminator([fake_images, fake_labels_one_hot])
+            # O gerador agora recebe apenas o vetor de ruído
+            fake_images = self.generator(random_z)
+            # O discriminador agora recebe apenas a imagem
+            fake_output = self.discriminator(fake_images)
             g_loss = self.g_loss_fn(fake_output)
 
         g_grads = tape.gradient(g_loss, self.generator.trainable_variables)
@@ -79,7 +68,7 @@ class GAN(Model):
 
         return {"d_loss": self.d_metric.result(), "g_loss": self.g_metric.result()}
 
-# Definição das funções de perda
+# As funções de perda permanecem as mesmas
 def hinge_d_loss_fn(real_output, fake_output):
     d_loss_real = tf.reduce_mean(tf.nn.relu(1.0 - real_output))
     d_loss_fake = tf.reduce_mean(tf.nn.relu(1.0 + fake_output))
