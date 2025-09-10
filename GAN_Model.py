@@ -6,7 +6,7 @@ import numpy as np
 from generator import Generator
 from discriminator import Discriminator
 
-class GAN(Model):
+class GAN_Model(Model):
     """
     Representa a arquitetura GAN que combina o Gerador e o Discriminador.
     """
