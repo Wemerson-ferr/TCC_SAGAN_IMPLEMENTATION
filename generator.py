@@ -1,129 +1,53 @@
-import tensorflow as tf
-from tensorflow.keras.layers import Layer, Conv2D, Dense, Reshape, BatchNormalization
-from tensorflow.keras.models import Model
-from tensorflow.keras import activations
-from tensorflow_addons.layers import SpectralNormalization
+import torch.nn as nn
+from torch.nn.utils import spectral_norm
 
-def usample(x, size):
-    """Upscales o vetor de entrada por um fator de 2 usando vizinho mais próximo."""
-    return tf.image.resize(x, [size[0] * 2, size[1] * 2], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
 
-# A classe ConditionalBatchNorm foi removida.
+from modules import Self_Attn
 
-class SelfAttention(Layer):
-    def __init__(self, channels, **kwargs):
-        super(SelfAttention, self).__init__(**kwargs)
-        self.channels = channels
-        self.query_conv = SpectralNormalization(Conv2D(channels // 8, kernel_size=1, padding='same'))
-        self.key_conv = SpectralNormalization(Conv2D(channels // 8, kernel_size=1, padding='same'))
-        self.value_conv = SpectralNormalization(Conv2D(channels, kernel_size=1, padding='same'))
-        self.gamma = tf.Variable(initial_value=tf.zeros(1), trainable=True)
-    
-    def call(self, x):
-        batch_size, h, w, c = x.shape
-        proj_query = tf.reshape(self.query_conv(x), (batch_size, -1, self.channels // 8))
-        proj_key = tf.reshape(self.key_conv(x), (batch_size, -1, self.channels // 8))
-        
-        energy = tf.matmul(proj_key, proj_query, transpose_b=True)
-        attention = tf.nn.softmax(energy)
-        
-        proj_value = tf.reshape(self.value_conv(x), (batch_size, -1, self.channels))
-        
-        out = tf.matmul(proj_value, attention, transpose_b=True)
-        out = tf.reshape(out, (batch_size, h, w, c))
-        
-        out = self.gamma * out + x
-        return out
+class ResBlockGenerator(nn.Module):
+    """ Bloco Residual específico para o Gerador (Upsampling). """
+    def __init__(self, in_channels, out_channels):
+        super(ResBlockGenerator, self).__init__()
+        self.main = nn.Sequential(
+            nn.ReLU(),
+            nn.Upsample(scale_factor=2),
+            spectral_norm(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)),
+            nn.ReLU(),
+            spectral_norm(nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1))
+        )
+        self.skip = nn.Sequential(
+            nn.Upsample(scale_factor=2),
+            spectral_norm(nn.Conv2d(in_channels, out_channels, kernel_size=1))
+        )
 
-class GBlock(Layer):
-    def __init__(self, out_channels, **kwargs):
-        super(GBlock, self).__init__(**kwargs)
-        self.out_channels = out_channels
+    def forward(self, x):
+        return self.main(x) + self.skip(x)
 
-        # Camadas do ramo principal, agora usando BatchNormalization normal
-        self.bn0 = BatchNormalization()
-        self.conv_main1 = SpectralNormalization(Conv2D(out_channels, 3, padding='same'))
-        self.bn1 = BatchNormalization()
-        self.conv_main2 = SpectralNormalization(Conv2D(out_channels, 3, padding='same'))
 
-        # Camada do atalho (shortcut)
-        self.conv_shortcut = SpectralNormalization(Conv2D(out_channels, 1, padding='same'))
-
-    def call(self, inputs): # Removido labels
-        x = inputs
-        # Upsample e aplicação do atalho
-        x_shortcut = usample(x, x.shape[1:3])
-        x_shortcut = self.conv_shortcut(x_shortcut)
-
-        # Ramo principal
-        x = activations.relu(self.bn0(x)) # Removido o argumento labels
-        x = usample(x, x.shape[1:3])
-        x = self.conv_main1(x)
-        x = activations.relu(self.bn1(x)) # Removido o argumento labels
-        x = self.conv_main2(x)
-
-        # Adição do atalho
-        return x + x_shortcut
-
-    def get_config(self):
-        config = super(GBlock, self).get_config()
-        config.update({
-            'out_channels': self.out_channels,
-            # Removido 'num_classes'
-        })
-        return config
-
-class Generator(Model):
-    def __init__(self, gf_dim, z_dim, **kwargs):
-        super(Generator, self).__init__(**kwargs)
-        self.gf_dim = gf_dim
+class Generator(nn.Module):
+    """ Gerador baseado em ResNet para SAGAN. """
+    def __init__(self, z_dim=128, g_channels=64, image_size=128):
+        super(Generator, self).__init__()
         self.z_dim = z_dim
-        
-        # O modelo começa com uma camada densa e um reshape
-        self.dense_in = SpectralNormalization(Dense(gf_dim * 16 * 4 * 4))
-        self.reshape = Reshape((4, 4, gf_dim * 16))
 
-        self.block1 = GBlock(gf_dim * 16) # -> 8x8
-        self.block2 = GBlock(gf_dim * 8)  # -> 16x16
-        self.block3 = GBlock(gf_dim * 4)  # -> 32x32
+        self.dense = spectral_norm(nn.Linear(self.z_dim, 4 * 4 * g_channels * 16))
+        self.res1 = ResBlockGenerator(g_channels * 16, g_channels * 8)
+        self.res2 = ResBlockGenerator(g_channels * 8, g_channels * 4)
+        self.res3 = ResBlockGenerator(g_channels * 4, g_channels * 2)
+        self.attn = Self_Attn(g_channels * 2)
+        self.res4 = ResBlockGenerator(g_channels * 2, g_channels)
+        self.final = nn.Sequential(
+            nn.ReLU(),
+            nn.Upsample(scale_factor=2),
+            spectral_norm(nn.Conv2d(g_channels, 3, kernel_size=3, padding=1)),
+            nn.Tanh()
+        )
 
-        # Camada de Self-Attention
-        self.attention = SelfAttention(gf_dim * 4)
-
-        self.block4 = GBlock(gf_dim * 2)  # -> 64x64
-        self.block5 = GBlock(gf_dim)      # -> 128x128
-        
-        # Camada de Batch Normalization e a convolução final
-        self.final_bn = BatchNormalization()
-        self.final_conv = SpectralNormalization(Conv2D(3, 3, padding='same', activation='tanh'))
-
-    def call(self, inputs, training=True): # Removido labels
-        
-        # Camada de entrada
-        x = self.dense_in(inputs)
-        x = self.reshape(x)
-        
-        # Blocos residuais
-        x = self.block1(x)
-        x = self.block2(x)
-        x = self.block3(x)
-        
-        # Camada de atenção
-        x = self.attention(x)
-        
-        x = self.block4(x)
-        x = self.block5(x)
-        
-        # Camadas finais
-        x = activations.relu(self.final_bn(x, training=training))
-        x = self.final_conv(x)
-        
-        return x
-
-    def get_config(self):
-        config = super(Generator, self).get_config()
-        config.update({
-            'gf_dim': self.gf_dim,
-            'z_dim': self.z_dim,
-        })
-        return config
+    def forward(self, z):
+        x = self.dense(z).view(-1, 1024, 4, 4)
+        x = self.res1(x)
+        x = self.res2(x)
+        x = self.res3(x)
+        x, _ = self.attn(x)
+        x = self.res4(x)
+        return self.final(x)
